@@ -1,0 +1,4 @@
+env/
+.git/
+charts/
+meteoswiss_data/
