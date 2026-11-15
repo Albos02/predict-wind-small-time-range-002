@@ -4,9 +4,9 @@ from contextlib import contextmanager
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-# from sklearn.ensemble import HistGradientBoostingRegressor
+from scipy.stats import gaussian_kde
 from sklearn.inspection import permutation_importance
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
 from data_management import load_data, clean_data, show_new_parameters
@@ -91,6 +91,7 @@ MODEL_PARAMETERS = {
     "objective": "reg:absoluteerror",
     "tree_method": "hist",
     "device": "cuda",
+    "eval_metric": "rmse",
     "random_state": 42,
 }
 ##########################################################
@@ -174,7 +175,17 @@ def make_xy(df):
     return data[X.columns], data[y.columns]
 
 
-def charts(X_test, Y_test, target, model, dontshowlist):
+def charts(
+    X_test,
+    Y_test,
+    target,
+    model,
+    dontshowlist,
+    Y_train=None,
+    evals_result=None,
+    pred_train=None,
+    pred_test=None,
+):
     col = f"y_{target}"
     true = Y_test[col]
     pers = X_test[target]
@@ -185,26 +196,26 @@ def charts(X_test, Y_test, target, model, dontshowlist):
     residual = pred - true
     abs_err = residual.abs()
     mae_p, mae_m = mean_absolute_error(true, pers), mean_absolute_error(true, pred)
-    # print(f"{target}: persistence={mae_p:.3f} | model={mae_m:.3f}")
 
-    # 1. MAE: model vs persistence
+    # Existing charts: model vs persistence MAE.
     if "1" not in dontshowlist:
         plt.figure(figsize=(5, 4))
         plt.bar(["persistence", "model"], [mae_p, mae_m])
         plt.title("MAE (km/h)")
 
-    # 2. predicted vs actual
+    # Existing charts: predicted vs actual.
     if "2" not in dontshowlist:
         plt.figure(figsize=(6, 6))
         plt.scatter(true, pred, s=2, alpha=0.2)
         lim = [true.min(), true.max()]
         plt.plot(lim, lim, "r")
-        plt.xlabel("actual"); plt.ylabel("predicted")
+        plt.xlabel("actual")
+        plt.ylabel("predicted")
         plt.title(f"{target}: predicted vs actual (+{HORIZON * 10} min)")
 
-    # 3. time series, first day of test
+    # Existing charts: time series, first day of test.
     if "3" not in dontshowlist:
-        n = 144 * 1
+        n = 144
         actual = true.to_numpy()[:n]
         pred_n = pred.to_numpy()[:n]
         pers_n = pers.to_numpy()[:n]
@@ -222,30 +233,107 @@ def charts(X_test, Y_test, target, model, dontshowlist):
         ax[1].set_title("|pred - actual| (MAE = its mean)")
         fig.tight_layout()
 
-    # 4. residual histogram
+    # Existing charts: residual histogram.
     if "4" not in dontshowlist:
         plt.figure(figsize=(6, 4))
         plt.hist(residual, bins=80)
         plt.title("Residuals (pred - actual)")
 
-    # 5. MAE by hour and month
+    # Existing charts: MAE by hour and month.
     if "5" not in dontshowlist:
         fig, ax = plt.subplots(1, 2, figsize=(12, 4))
         abs_err.groupby(abs_err.index.hour).mean().plot(ax=ax[0], title="MAE by hour")
         abs_err.groupby(abs_err.index.month).mean().plot(ax=ax[1], title="MAE by month")
         fig.tight_layout()
 
-    # 6. MAE by current speed
+    # Existing charts: MAE by current speed.
     if "6" not in dontshowlist:
         bins = pd.cut(pers, [0, 5, 10, 15, 20, 30, 50, 200])
-        abs_err.groupby(bins, observed=True).mean().plot.bar(figsize=(8, 4), title="MAE by current speed")
+        abs_err.groupby(bins, observed=True).mean().plot.bar(
+            figsize=(8, 4), title="MAE by current speed"
+        )
 
-    # 7. permutation importance
+    # Existing charts: permutation importance.
     if "7" not in dontshowlist:
         idx = np.random.RandomState(0).choice(len(X_test), min(5000, len(X_test)), replace=False)
-        pi = permutation_importance(model, X_test.iloc[idx], (true - pers).iloc[idx], n_repeats=5, scoring="neg_mean_absolute_error", random_state=0)
-        # print(X_test.columns, pi.importances_mean, pi.importances_std)
-        pd.Series(pi.importances_mean, index=X_test.columns).nlargest(20)[::-1].plot.barh(figsize=(8, 7), title="Permutation importance (top 20)")
+        pi = permutation_importance(
+            model,
+            X_test.iloc[idx],
+            (true - pers).iloc[idx],
+            n_repeats=5,
+            scoring="neg_mean_absolute_error",
+            random_state=0,
+        )
+        pd.Series(pi.importances_mean, index=X_test.columns).nlargest(20)[::-1].plot.barh(
+            figsize=(8, 7), title="Permutation importance (top 20)"
+        )
+
+
+    if Y_train is None or evals_result is None:
+        return
+
+    y_train = Y_train[col].to_numpy()
+    y_test = true.to_numpy()
+    pred_train = np.asarray(pred_train)
+    pred_test = np.asarray(pred_test if pred_test is not None else pred)
+    train_rmse = np.asarray(evals_result["validation_0"]["rmse"])
+    test_rmse = np.asarray(evals_result["validation_1"]["rmse"])
+    epochs = len(train_rmse)
+    train_r2_history = 1 - train_rmse**2 / np.var(y_train)
+    test_r2_history = 1 - test_rmse**2 / np.var(y_test)
+
+        # Appended charts: training curves, residual distribution, and feature importance.
+    if "8" not in dontshowlist:
+        fig, ax = plt.subplots(2, 2, figsize=(18, 15))
+        ax[0, 0].plot(range(epochs), train_rmse, label="Train Loss", color="blue")
+        ax[0, 0].plot(range(epochs), test_rmse, label="Test Loss", color="red", linestyle="--")
+        ax[0, 0].set_title("Évolution du Loss (Erreur RMSE)")
+        ax[0, 0].legend()
+        ax[0, 0].grid(alpha=0.3)
+
+        ax[0, 1].plot(range(epochs), train_r2_history, label="Train R²", color="green")
+        ax[0, 1].plot(range(epochs), test_r2_history, label="Test R²", color="darkorange", linestyle="--")
+        r2_min = min(float(np.min(train_r2_history)), float(np.min(test_r2_history)))
+        r2_max = max(float(np.max(train_r2_history)), float(np.max(test_r2_history)))
+        r2_center = (r2_min + r2_max) / 2
+        r2_half_range = max((r2_max - r2_min) * 0.55, 0.001)
+        ax[0, 1].set_ylim(r2_center - r2_half_range, r2_center + r2_half_range)
+        ax[0, 1].set_title("Focus sur la convergence (Score R²)")
+        ax[0, 1].set_xlabel("Nombre d'arbres")
+        ax[0, 1].set_ylabel("R² (Zoomé)")
+        ax[0, 1].legend()
+        ax[0, 1].grid(alpha=0.3, which="both")
+
+        residuals = y_test - pred_test
+        ax[1, 0].hist(residuals, bins=100, density=True, color="purple", alpha=0.65)
+        kde_sample = residuals
+        if len(kde_sample) > 5000:
+            kde_sample = np.random.RandomState(42).choice(kde_sample, 5000, replace=False)
+        if len(kde_sample) > 1 and np.std(kde_sample) > 0:
+            kde = gaussian_kde(kde_sample)
+            x_grid = np.linspace(np.min(residuals), np.max(residuals), 500)
+            ax[1, 0].plot(x_grid, kde(x_grid), color="black", linewidth=1.5)
+        ax[1, 0].axvline(x=0, color="black", linestyle="--")
+        ax[1, 0].set_title("Distribution des erreurs (Résidus)")
+
+        importance = model.get_booster().get_score(importance_type="weight")
+        feature_names = model.get_booster().feature_names or []
+        importances = [importance.get(name, 0) for name in feature_names]
+        colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.9, max(1, len(feature_names))))
+        ax[1, 1].barh(feature_names, importances, color=colors)
+        ax[1, 1].set_title("Importance des variables")
+
+        fig.tight_layout()
+
+    if "9" not in dontshowlist:
+
+        # Appended chart: zoomed actual-versus-predicted test series.
+        n = min(300, len(y_test))
+        plt.figure(figsize=(18, 6))
+        plt.plot(y_test[:n], label="Réel", color="black", alpha=0.7)
+        plt.plot(pred_test[:n], label="Prédit", color="orange", linestyle="--")
+        plt.title("Zoom 50h : Réel vs Prédit")
+        plt.legend()
 
     plt.show()
 
@@ -275,11 +363,18 @@ def main():
         col = f"y_{target}"
         # Learn the change from persistence; add the current value back at inference.
         residual_train = Y_train[col] - X_train[target]
+        residual_test = Y_test[col] - X_test[target]
 
         with timed_step(f"TRAIN MODEL [{target}]"):
-            print(f"🚀 Training XGBoost on {len(X_train)} rows...")
+            print(f"🚀 Lancement de l'entraînement GPU sur {len(X_train)} lignes...")
+            start_time = time.perf_counter()
             model = XGBRegressor(**MODEL_PARAMETERS)
-            model.fit(X_train, residual_train)
+            model.fit(
+                X_train,
+                residual_train,
+                eval_set=[(X_train, residual_train), (X_test, residual_test)],
+                verbose=False,
+            )
 
             # Previous HistGradientBoostingRegressor implementation:
             # from sklearn.ensemble import HistGradientBoostingRegressor
@@ -288,15 +383,35 @@ def main():
             # )
             # model.fit(X_train, residual_train)
 
-            # Evaluation and permutation importance use CPU-backed pandas data.
+            duration = time.perf_counter() - start_time
+            print(f"✅ Terminé en {duration:.2f} secondes (soit {duration / 60:.2f} minutes)")
+            # Predictions and diagnostics use CPU-backed pandas data.
             model.get_booster().set_param({"device": "cpu"})
-
+            pred_train = pd.Series(
+                model.predict(X_train) + X_train[target].to_numpy(),
+                index=Y_train.index,
+            )
             pred = pd.Series(
                 model.predict(X_test) + X_test[target].to_numpy(),
                 index=Y_test.index,
             )
             mae = mean_absolute_error(Y_test[col], pred)
+            rmse = np.sqrt(mean_squared_error(Y_test[col], pred))
+            r2 = r2_score(Y_test[col], pred)
+            r2_train = r2_score(Y_train[col], pred_train)
+            evals_result = model.evals_result()
+            abs_error = np.abs(Y_test[col].to_numpy() - pred.to_numpy())
 
+            print('')
+            print("--- RÉSULTATS ---")
+            print(f"Score R² (TEST) : {r2:.4f}")
+            print(f"Score R² (TRAIN) : {r2_train:.4f} (Pour vérifier l'overfitting)")
+            print(f"Erreur moyenne (MAE) : {mae:.2f} km/h")
+            print(f"RMSE : {rmse:.2f} km/h")
+            print("Pourcentage du temps où l'erreur est sous le seuil :")
+            for threshold in (2, 5, 10, 15, 20):
+                pct_within_threshold = np.mean(abs_error < threshold) * 100
+                print(f"  < {threshold:2d} km/h : {pct_within_threshold:.1f}%")
 
         with open('last_mae.txt', 'r') as f:
             last_mae = float(f.readlines()[0])
@@ -316,7 +431,17 @@ def main():
             print('🟥' * k)
 
         with timed_step(f"CHARTS [{target}]"):
-            charts(X_test, Y_test, target, model, "1 2 3 4 5 6 7")
+            charts(
+                X_test,
+                Y_test,
+                target,
+                model,
+                "1 2 3 4 5 6 7 8 9",
+                Y_train=Y_train,
+                evals_result=evals_result,
+                pred_train=pred_train,
+                pred_test=pred,
+            )
 
 if __name__ == "__main__":
     main()
