@@ -1,3 +1,6 @@
+import time
+from contextlib import contextmanager
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,7 +11,42 @@ from sklearn.metrics import mean_absolute_error
 from data_management import load_data, clean_data, show_new_parameters
 
 
-############ VARIABLES ############
+BASELINE_TIMES = {
+    "LOAD DATA": 2.06,
+    "CLEAN DATA": 0.08,
+    "CHECK NEW PARAMETERS": 0.01,
+    "PREPARE FEATURES": 0.08,
+    "SPLIT TRAIN / TEST": 0.01,
+    "BUILD X / Y": 0.58,
+    "TRAIN MODEL": 8.31,
+    "CHARTS": 0.12,
+}
+
+
+def timing_marker(elapsed, baseline):
+    if not baseline:
+        return ""
+    ratio = elapsed / baseline
+    if 0.8 <= ratio <= 1.2:
+        return "🟨"
+    if ratio < 0.8:
+        return "🟩" * min(8, 1 + int((1 - ratio) / 0.25))
+    return "🟥" * min(8, 1 + int((ratio - 1) / 0.25))
+
+
+@contextmanager
+def timed_step(name):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        key = name.split(" [")[0]
+        marker = timing_marker(elapsed, BASELINE_TIMES.get(key))
+        print(f"⏱  {name:<40} {elapsed:7.2f} s  {marker}")
+
+
+######################## VARIABLES ########################
 
 INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN series up to gap of 2
 
@@ -19,9 +57,15 @@ COLS = ["temp_c", "humidity_pct", "pressure_qff_hpa",
 
 TARGETS = ["wind_speed_kmh"]
 # TARGETS = ["wind_speed_kmh", "wind_gust_max_kmh", "dir_sin", "dir_cos"]
-LAGS = [1, 2, 3, 6, 12, 36, 144]   # 10 min ... 24 h
+LAGS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 36, 48]   # 10 min ... 24 h
+# LAGS = []   # 10 min ... 24 h
+# for i in range(24):
+#     LAGS.append(int(i))    # 10 min ... 24 h
 
-##################################
+TRENDS = ["1-0", "2-0", "3-0", "6-0"]
+TREND_COLS = ["wind_speed_kmh", "pressure_qff_hpa"]
+
+##########################################################
 
 
 def prepare(df, last_added_parameter):
@@ -50,6 +94,9 @@ def make_xy(df):
     X = df.copy()
     for lag in LAGS:
         X = X.join(df.shift(lag).add_suffix(f"_lag{lag}"))
+    for tr in TRENDS:
+        a, b = map(int, tr.split("-"))   # a = older point, b = newer point (0 = now)
+        X = X.join((df[TREND_COLS].shift(b) - df[TREND_COLS].shift(a)).add_suffix(f"_trend{tr}"))
     y = df[TARGETS].shift(-HORIZON).add_prefix("y_")
     data = X.join(y).dropna()
 
@@ -129,42 +176,55 @@ def charts(X_test, Y_test, target, model, dontshowlist):
 
 
 def main():
-    df = load_data()
-    df = clean_data(df, unit="kmh")
-    last_added_parameter = show_new_parameters(df[COLS])
-    df = prepare(df, last_added_parameter)
+    with timed_step("LOAD DATA"):
+        df = load_data()
 
-    df_train, df_test = split(df)
-    # print(df_train.index.min(), df_train.index.max(), len(df_train))
-    # print(df_test.index.min(), df_test.index.max(), len(df_test))
+    with timed_step("CLEAN DATA"):
+        df = clean_data(df, unit="kmh")
 
-    X_train, Y_train = make_xy(df_train)
-    X_test, Y_test = make_xy(df_test)
+    with timed_step("CHECK NEW PARAMETERS"):
+        last_added_parameter = show_new_parameters(df[COLS])
+
+    with timed_step("PREPARE FEATURES"):
+        df = prepare(df, last_added_parameter)
+
+    with timed_step("SPLIT TRAIN / TEST"):
+        df_train, df_test = split(df)
+
+    with timed_step("BUILD X / Y"):
+        X_train, Y_train = make_xy(df_train)
+        X_test, Y_test = make_xy(df_test)
 
 
     for target in TARGETS:
         col = f"y_{target}"
         base = mean_absolute_error(Y_test[col], X_test[target]) # base = score we get by saying : in HORIZON time it will be like rn
 
-        print('TRAINING...')
-        model = HistGradientBoostingRegressor(max_iter=300, random_state=42, learning_rate=0.1)
-        model.fit(X_train, Y_train[col])
-        mae = mean_absolute_error(model.predict(X_test), Y_test[col])
+        with timed_step(f"TRAIN MODEL [{target}]"):
+            print('TRAINING ...')
+            model = HistGradientBoostingRegressor(max_iter=100, random_state=42, learning_rate=0.1)
+            model.fit(X_train, Y_train[col])
+            mae = mean_absolute_error(model.predict(X_test), Y_test[col])
 
         with open('last_mae.txt', 'r') as f:
             last_mae = float(f.readlines()[0])
         with open('last_mae.txt', 'w') as f:
             f.write(str(mae))
             
-        print(f"{target}: {last_mae:.3f} -> model={mae:.3f}")
-        if last_mae < mae:
-            print('✅️')
-        elif last_mae == mae:
-            print('--')
-        else:
-            print('❌️')
+        delta = last_mae - mae                       # > 0 = improvement
+        pct = abs(delta) / last_mae * 100
+        k = min(20, 1 + int(pct / 0.5))              # 1 emoji per 0.5% change
 
-        charts(X_test, Y_test, target, model, "124567")
+        print(f"{target}: {last_mae:.3f} -> model={mae:.3f} ({-pct if delta < 0 else pct:+.1f}%)")
+        if round(last_mae, 3) == round(mae, 3):
+            print('🟨' * 3)
+        elif delta > 0:
+            print('🟩' * k)
+        else:
+            print('🟥' * k)
+
+        with timed_step(f"CHARTS [{target}]"):
+            charts(X_test, Y_test, target, model, "1 2 3 4 5 6 7")
 
 if __name__ == "__main__":
     main()
