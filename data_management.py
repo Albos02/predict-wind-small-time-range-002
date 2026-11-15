@@ -67,3 +67,20 @@ def clean_data(df, unit="kmh"):
     df = df.drop(columns=["station", "wind_chill_c", "dew_point_c", "vapour_pressure_hpa", "pressure_station_hpa", "pressure_qnh_hpa"])
     df = df.dropna(subset=required)    # drop rows missing the target columns
     return df
+
+def show_new_parameters(df):
+    first = pd.to_datetime(df.apply(pd.Series.first_valid_index)).dropna()
+    start = df.index[0].normalize()
+
+    last_added_parameter = first.max()
+    print('')
+    print('<<<<< PARAMETERS ADDING DATES >>>>>')
+    for day, group in first.groupby(first.dt.normalize()):
+        names = ", ".join(group.index)
+        if day == start:
+            print(f"SINCE START ({day.day} {day:%B %Y}) : {names}")
+        else:
+            print(f"ADDED ON THE {day.day} {day:%B %Y} : {names}")
+        last_added_parameter = day
+    print('')
+    return last_added_parameter

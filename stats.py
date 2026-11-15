@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-from data_management import load_data, clean_data
+from data_management import load_data, clean_data, show_new_parameters
 
 
 def show_data(df):
@@ -55,18 +55,6 @@ def show_data(df):
     print('')
     print('--------------------------------------------------------------------------------------------------------------')
 
-def show_new_parameters(df):
-    first = pd.to_datetime(df.apply(pd.Series.first_valid_index)).dropna()
-    start = df.index[0].normalize()
-
-    print('')
-    print('<<<<< PARAMETERS ADDING DATES >>>>>')
-    for day, group in first.groupby(first.dt.normalize()):
-        names = ", ".join(group.index)
-        if day == start:
-            print(f"SINCE START ({day.day} {day:%B %Y}) : {names}")
-        else:
-            print(f"ADDED ON THE {day.day} {day:%B %Y} : {names}")
 
 
 
