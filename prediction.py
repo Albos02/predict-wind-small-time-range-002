@@ -52,7 +52,8 @@ def timed_step(name):
 INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN series up to gap of 2
 
 HORIZON = 2  # 2 x 10 min = 20 min
-FEATURE_STATIONS = ("AIG", "ORO")
+TARGET_STATION = "BOU"
+FEATURE_STATIONS = ("AIG")
 STATION_PREFIXES = ("", *(f"{station.lower()}_" for station in FEATURE_STATIONS))
 WIND_COLS = ["wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
 COLS = WIND_COLS + [
@@ -378,7 +379,7 @@ def charts(
 
 def main():
     with timed_step("LOAD DATA"):
-        df = load_prediction_data(feature_stations=FEATURE_STATIONS)
+        df = load_prediction_data(target_station=TARGET_STATION, feature_stations=FEATURE_STATIONS)
 
     with timed_step("CLEAN DATA"):
         df = clean_data(df, unit="kmh")

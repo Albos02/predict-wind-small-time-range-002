@@ -41,9 +41,16 @@ def _load_stations(stations):
             parse_dates=["reference_timestamp"],
             dayfirst=True,
         )
+        matching_rows = part.loc[part["station_abbr"].isin(stations)]
+        matching_stations = {
+            station: station_part
+            for station, station_part in matching_rows.groupby("station_abbr", sort=False)
+        }
         for station in stations:
-            station_part = part[part["station_abbr"] == station]
-            if not station_part.empty:
+            station_part = matching_stations.get(station)
+            if station_part is None:
+                station_part = part.iloc[:0]
+            else:
                 print(f"{f.name} [{station}]: {len(station_part)} rows")
             parts[station].append(station_part)
 
@@ -62,7 +69,7 @@ def load_data(station="BOU"):
     return _load_stations([station])[station]
 
 
-def load_prediction_data(target_station="BOU", feature_stations=("AIG", "ORO")):
+def load_prediction_data(target_station="BOU", feature_stations=[]):
     """Load the target station and align nearby wind observations by timestamp."""
     stations = [target_station, *feature_stations]
     station_data = _load_stations(stations)
