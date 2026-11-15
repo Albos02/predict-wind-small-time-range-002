@@ -27,7 +27,7 @@ RENAME = {
 
 def _load_stations(stations):
     stations = tuple(dict.fromkeys(stations))
-    files = sorted(DATA_DIR.glob(PATTERN))
+    files = sorted(DATA_DIR.rglob(PATTERN))
     if not files:
         raise FileNotFoundError(f"no files matching {PATTERN} in {DATA_DIR}")
 
