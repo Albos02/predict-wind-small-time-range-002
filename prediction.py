@@ -53,6 +53,7 @@ INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN serie
 
 HORIZON = 2  # 2 x 10 min = 20 min
 FEATURE_STATIONS = ("AIG", "ORO")
+STATION_PREFIXES = ("", *(f"{station.lower()}_" for station in FEATURE_STATIONS))
 WIND_COLS = ["wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
 COLS = WIND_COLS + [
     f"{station.lower()}_{col}"
@@ -77,12 +78,28 @@ LAGS = [1, 2, 3, 4, 5, 6, 9, 12, 36, 48]   # 10 min ... 24 h
 ROLLING_WINDOWS = {"20m": 3, "1h": 7, "3h": 19}
 DIRECTION_CHANGE_LAGS = {"10m": 1, "30m": 3, "1h": 6}
 TREND_PERIODS = ("1-0", "2-0", "3-0")
-TREND_COLS = ["wind_speed_kmh", "wind_gust_max_kmh", "dir_sin", "dir_cos"]
+ROLLING_COLS = [
+    f"{prefix}{col}"
+    for prefix in STATION_PREFIXES
+    for col in ("wind_speed_kmh", "wind_gust_max_kmh")
+]
+TREND_COLS = [
+    f"{prefix}{col}"
+    for prefix in STATION_PREFIXES
+    for col in (
+        "wind_speed_kmh",
+        "wind_gust_max_kmh",
+        "dir_sin",
+        "dir_cos",
+        "wind_u_kmh",
+        "wind_v_kmh",
+    )
+]
 
 
 # XGBoost model configuration.
 MODEL_PARAMETERS = {
-    "n_estimators": 300,
+    "n_estimators": 500,
     "max_depth": 6,
     "learning_rate": 0.1,
     "objective": "reg:absoluteerror",
@@ -104,7 +121,28 @@ def prepare(df, last_added_parameter):
         df[f"{feature_prefix}_cos"] = np.cos(rad)
     df = df.drop(columns=list(_DIRECTION_COLS))
 
-    # if degrees needed : df["wind_dir_deg"] = np.rad2deg(np.arctan2(df["dir_sin"], df["dir_cos"])) % 360
+    # Wind vectors combine speed and direction into physically meaningful
+    # components (positive values point toward east/north respectively).
+    for prefix in STATION_PREFIXES:
+        rad = np.arctan2(df[f"{prefix}dir_sin"], df[f"{prefix}dir_cos"])
+        speed = df[f"{prefix}wind_speed_kmh"]
+        df[f"{prefix}wind_u_kmh"] = -speed * np.sin(rad)
+        df[f"{prefix}wind_v_kmh"] = -speed * np.cos(rad)
+
+    # Relative observations help the model distinguish shared regional flow
+    # from local differences at BOU.
+    for station in FEATURE_STATIONS:
+        prefix = f"{station.lower()}_"
+        df[f"{prefix}speed_delta_from_bou"] = (
+            df[f"{prefix}wind_speed_kmh"] - df["wind_speed_kmh"]
+        )
+        df[f"{prefix}gust_delta_from_bou"] = (
+            df[f"{prefix}wind_gust_max_kmh"] - df["wind_gust_max_kmh"]
+        )
+        for component in ("wind_u_kmh", "wind_v_kmh"):
+            df[f"{prefix}{component}_delta_from_bou"] = (
+                df[f"{prefix}{component}"] - df[component]
+            )
 
     df = df.asfreq("10min")
     
@@ -123,7 +161,7 @@ def make_xy(df):
     # Trailing summaries capture the local level, variability, and rate of
     # change. These windows include the current observation but never look
     # forward in time.
-    for col in ("wind_speed_kmh", "wind_gust_max_kmh"):
+    for col in ROLLING_COLS:
         series = df[col]
         for period, window in ROLLING_WINDOWS.items():
             rolling = series.rolling(window=window, min_periods=window)
@@ -137,15 +175,18 @@ def make_xy(df):
     # Circular direction deltas avoid the discontinuity between 359 and 0
     # degrees. The sine/cosine pair describes the turn from the older
     # observation to the current one.
-    for period, lag in DIRECTION_CHANGE_LAGS.items():
-        old_sin = df["dir_sin"].shift(lag)
-        old_cos = df["dir_cos"].shift(lag)
-        X[f"dir_change_sin_{period}"] = (
-            df["dir_sin"] * old_cos - df["dir_cos"] * old_sin
-        )
-        X[f"dir_change_cos_{period}"] = (
-            df["dir_sin"] * old_sin + df["dir_cos"] * old_cos
-        )
+    for prefix in STATION_PREFIXES:
+        for period, lag in DIRECTION_CHANGE_LAGS.items():
+            old_sin = df[f"{prefix}dir_sin"].shift(lag)
+            old_cos = df[f"{prefix}dir_cos"].shift(lag)
+            X[f"{prefix}dir_change_sin_{period}"] = (
+                df[f"{prefix}dir_sin"] * old_cos
+                - df[f"{prefix}dir_cos"] * old_sin
+            )
+            X[f"{prefix}dir_change_cos_{period}"] = (
+                df[f"{prefix}dir_sin"] * old_sin
+                + df[f"{prefix}dir_cos"] * old_cos
+            )
 
     # Cyclic calendar features let the model learn recurring daily and annual
     # patterns without artificial jumps at midnight or New Year's Day.
