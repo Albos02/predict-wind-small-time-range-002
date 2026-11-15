@@ -62,6 +62,12 @@ LAGS = [1, 2, 3, 4, 5, 6, 9, 12, 36, 48]   # 10 min ... 24 h
 # for i in range(24):
 #     LAGS.append(int(i))    # 10 min ... 24 h
 
+# Window lengths are sample counts at the 10-minute data cadence. A 3-sample
+# window spans 20 minutes (first to last observation), 7 spans 1 hour, and 19
+# spans 3 hours.
+ROLLING_WINDOWS = {"20m": 3, "1h": 7, "3h": 19}
+DIRECTION_CHANGE_LAGS = {"10m": 1, "30m": 3, "1h": 6}
+
 TREND_GROUPS = {
     1: {
         "name": "short-term",
@@ -114,6 +120,48 @@ def split(df, test_from="2023-01-01"):
 
 def make_xy(df):
     X = df.copy()
+
+    # Trailing summaries capture the local level, variability, and rate of
+    # change. These windows include the current observation but never look
+    # forward in time.
+    for col in ("wind_speed_kmh", "wind_gust_max_kmh"):
+        series = df[col]
+        for period, window in ROLLING_WINDOWS.items():
+            rolling = series.rolling(window=window, min_periods=window)
+            X[f"{col}_roll_mean_{period}"] = rolling.mean()
+            X[f"{col}_roll_std_{period}"] = rolling.std(ddof=0)
+            elapsed_hours = (window - 1) / 6
+            X[f"{col}_slope_per_hour_{period}"] = (
+                series - series.shift(window - 1)
+            ) / elapsed_hours
+
+    # Circular direction deltas avoid the discontinuity between 359 and 0
+    # degrees. The sine/cosine pair describes the turn from the older
+    # observation to the current one.
+    for period, lag in DIRECTION_CHANGE_LAGS.items():
+        old_sin = df["dir_sin"].shift(lag)
+        old_cos = df["dir_cos"].shift(lag)
+        X[f"dir_change_sin_{period}"] = (
+            df["dir_sin"] * old_cos - df["dir_cos"] * old_sin
+        )
+        X[f"dir_change_cos_{period}"] = (
+            df["dir_sin"] * old_sin + df["dir_cos"] * old_cos
+        )
+
+    # Cyclic calendar features let the model learn recurring daily and annual
+    # patterns without artificial jumps at midnight or New Year's Day.
+    hour = df.index.hour + df.index.minute / 60 + df.index.second / 3600
+    hour_angle = 2 * np.pi * hour / 24
+    X["hour_sin"] = np.sin(hour_angle)
+    X["hour_cos"] = np.cos(hour_angle)
+
+    fraction_of_day = hour / 24
+    days_in_year = np.where(df.index.is_leap_year, 366, 365)
+    year_position = df.index.dayofyear - 1 + fraction_of_day
+    year_angle = 2 * np.pi * year_position / days_in_year
+    X["dayofyear_sin"] = np.sin(year_angle)
+    X["dayofyear_cos"] = np.cos(year_angle)
+
     for lag in LAGS:
         X = X.join(df.shift(lag).add_suffix(f"_lag{lag}"))
     trend_group = TREND_GROUPS[TREND_GROUP]
