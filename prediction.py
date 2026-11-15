@@ -9,7 +9,7 @@ from sklearn.inspection import permutation_importance
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
-from data_management import load_data, clean_data, show_new_parameters
+from data_management import load_prediction_data, clean_data, show_new_parameters
 
 
 BASELINE_TIMES = {
@@ -52,7 +52,20 @@ def timed_step(name):
 INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN series up to gap of 2
 
 HORIZON = 2  # 2 x 10 min = 20 min
-COLS = ["wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
+FEATURE_STATIONS = ("AIG", "ORO")
+WIND_COLS = ["wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
+COLS = WIND_COLS + [
+    f"{station.lower()}_{col}"
+    for station in FEATURE_STATIONS
+    for col in WIND_COLS
+]
+_DIRECTION_COLS = {
+    "wind_dir_deg": "dir",
+    **{
+        f"{station.lower()}_wind_dir_deg": f"{station.lower()}_dir"
+        for station in FEATURE_STATIONS
+    },
+}
 
 
 TARGETS = ["wind_speed_kmh"]
@@ -84,11 +97,12 @@ MODEL_PARAMETERS = {
 def prepare(df, last_added_parameter):
     df = df[COLS].loc[last_added_parameter:].copy()   # start where all features exist
 
-    ## WIND DIRECTION ##
-    rad = np.deg2rad(df["wind_dir_deg"])
-    df["dir_sin"] = np.sin(rad)
-    df["dir_cos"] = np.cos(rad)
-    df = df.drop(columns="wind_dir_deg")
+    # Encode every station's compass direction without a discontinuity at north.
+    for direction_col, feature_prefix in _DIRECTION_COLS.items():
+        rad = np.deg2rad(df[direction_col])
+        df[f"{feature_prefix}_sin"] = np.sin(rad)
+        df[f"{feature_prefix}_cos"] = np.cos(rad)
+    df = df.drop(columns=list(_DIRECTION_COLS))
 
     # if degrees needed : df["wind_dir_deg"] = np.rad2deg(np.arctan2(df["dir_sin"], df["dir_cos"])) % 360
 
@@ -323,7 +337,7 @@ def charts(
 
 def main():
     with timed_step("LOAD DATA"):
-        df = load_data()
+        df = load_prediction_data(feature_stations=FEATURE_STATIONS)
 
     with timed_step("CLEAN DATA"):
         df = clean_data(df, unit="kmh")

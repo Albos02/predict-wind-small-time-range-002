@@ -25,12 +25,13 @@ RENAME = {
     "rre150z0": "precip_mm",
 }
 
-def load_data(station="BOU"):
+def _load_stations(stations):
+    stations = tuple(dict.fromkeys(stations))
     files = sorted(DATA_DIR.glob(PATTERN))
     if not files:
         raise FileNotFoundError(f"no files matching {PATTERN} in {DATA_DIR}")
 
-    parts = []
+    parts = {station: [] for station in stations}
     for f in files:
         part = pd.read_csv(
             f,
@@ -40,15 +41,38 @@ def load_data(station="BOU"):
             parse_dates=["reference_timestamp"],
             dayfirst=True,
         )
-        part = part[part["station_abbr"] == station]
-        print(f"{f.name}: {len(part)} rows")
-        parts.append(part)
+        for station in stations:
+            station_part = part[part["station_abbr"] == station]
+            if not station_part.empty:
+                print(f"{f.name} [{station}]: {len(station_part)} rows")
+            parts[station].append(station_part)
 
-    df = pd.concat(parts, ignore_index=True)
-    df = df.rename(columns=RENAME)
-    df = df.drop_duplicates(subset="reference_timestamp", keep="last")
-    df = df.set_index("reference_timestamp").sort_index()
-    df.index.name = "timestamp"
+    result = {}
+    for station, station_parts in parts.items():
+        df = pd.concat(station_parts, ignore_index=True)
+        df = df.rename(columns=RENAME)
+        df = df.drop_duplicates(subset="reference_timestamp", keep="last")
+        df = df.set_index("reference_timestamp").sort_index()
+        df.index.name = "timestamp"
+        result[station] = df
+    return result
+
+
+def load_data(station="BOU"):
+    return _load_stations([station])[station]
+
+
+def load_prediction_data(target_station="BOU", feature_stations=("AIG", "ORO")):
+    """Load the target station and align nearby wind observations by timestamp."""
+    stations = [target_station, *feature_stations]
+    station_data = _load_stations(stations)
+    df = station_data[target_station].copy()
+
+    wind_columns = ["wind_speed_kmh", "wind_dir_deg", "wind_gust_max_kmh"]
+    for station in feature_stations:
+        features = station_data[station][wind_columns].add_prefix(f"{station.lower()}_")
+        df = df.join(features, how="left")
+
     return df
 
 
