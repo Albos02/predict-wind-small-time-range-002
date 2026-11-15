@@ -64,7 +64,7 @@ def charts(X_test, Y_test, target, model, dontshowlist):
     residual = pred - true
     abs_err = residual.abs()
     mae_p, mae_m = mean_absolute_error(true, pers), mean_absolute_error(true, pred)
-    print(f"{target}: persistence={mae_p:.3f} | model={mae_m:.3f}")
+    # print(f"{target}: persistence={mae_p:.3f} | model={mae_m:.3f}")
 
     # 1. MAE: model vs persistence
     if "1" not in dontshowlist:
@@ -147,10 +147,22 @@ def main():
         base = mean_absolute_error(Y_test[col], X_test[target]) # base = score we get by saying : in HORIZON time it will be like rn
 
         print('TRAINING...')
-        model = HistGradientBoostingRegressor(max_iter=300, random_state=42, learning_rate=0.1, max_leaf_nodes=100)
+        model = HistGradientBoostingRegressor(max_iter=300, random_state=42, learning_rate=0.1)
         model.fit(X_train, Y_train[col])
         mae = mean_absolute_error(model.predict(X_test), Y_test[col])
-        print(f"{target}: {base:.3f} -> model={mae:.3f}")
+
+        with open('last_mae.txt', 'r') as f:
+            last_mae = float(f.readlines()[0])
+        with open('last_mae.txt', 'w') as f:
+            f.write(str(mae))
+            
+        print(f"{target}: {last_mae:.3f} -> model={mae:.3f}")
+        if last_mae < mae:
+            print('✅️')
+        elif last_mae == mae:
+            print('--')
+        else:
+            print('❌️')
 
         charts(X_test, Y_test, target, model, "124567")
 

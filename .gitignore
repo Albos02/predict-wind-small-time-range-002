@@ -3,3 +3,5 @@ env/
 charts/
 meteoswiss_data/
 __pycache__/
+last_mae.txt
+test*.py
