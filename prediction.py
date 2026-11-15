@@ -4,9 +4,10 @@ from contextlib import contextmanager
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.ensemble import HistGradientBoostingRegressor
+# from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import mean_absolute_error
+from xgboost import XGBRegressor
 
 from data_management import load_data, clean_data, show_new_parameters
 
@@ -75,6 +76,17 @@ TREND_GROUPS = {
 }
 TREND_GROUP = 1  # Select which trend group to use.
 
+
+# XGBoost model configuration.
+MODEL_PARAMETERS = {
+    "n_estimators": 300,
+    "max_depth": 6,
+    "learning_rate": 0.1,
+    "objective": "reg:absoluteerror",
+    "tree_method": "hist",
+    "device": "cuda",
+    "random_state": 42,
+}
 ##########################################################
 
 
@@ -118,7 +130,10 @@ def charts(X_test, Y_test, target, model, dontshowlist):
     col = f"y_{target}"
     true = Y_test[col]
     pers = X_test[target]
-    pred = pd.Series(model.predict(X_test), index=Y_test.index)
+    pred = pd.Series(
+        model.predict(X_test) + pers.to_numpy(),
+        index=Y_test.index,
+    )
     residual = pred - true
     abs_err = residual.abs()
     mae_p, mae_m = mean_absolute_error(true, pers), mean_absolute_error(true, pred)
@@ -210,16 +225,28 @@ def main():
 
     for target in TARGETS:
         col = f"y_{target}"
-        base = mean_absolute_error(Y_test[col], X_test[target]) # base = score we get by saying : in HORIZON time it will be like rn
+        # Learn the change from persistence; add the current value back at inference.
+        residual_train = Y_train[col] - X_train[target]
 
         with timed_step(f"TRAIN MODEL [{target}]"):
-            print('TRAINING ...')
-            model = HistGradientBoostingRegressor(loss="absolute_error", max_iter=100, random_state=42, learning_rate=0.1)
+            print(f"🚀 Training XGBoost on {len(X_train)} rows...")
+            model = XGBRegressor(**MODEL_PARAMETERS)
+            model.fit(X_train, residual_train)
 
-            model.fit(X_train, Y_train[col] - X_train[target])
+            # Previous HistGradientBoostingRegressor implementation:
+            # from sklearn.ensemble import HistGradientBoostingRegressor
+            # model = HistGradientBoostingRegressor(
+            #     loss="absolute_error", max_iter=100, random_state=42, learning_rate=0.1
+            # )
+            # model.fit(X_train, residual_train)
 
-            pred = pd.Series(model.predict(X_test) + X_test[target].to_numpy(), index=Y_test.index)
+            # Evaluation and permutation importance use CPU-backed pandas data.
+            model.get_booster().set_param({"device": "cpu"})
 
+            pred = pd.Series(
+                model.predict(X_test) + X_test[target].to_numpy(),
+                index=Y_test.index,
+            )
             mae = mean_absolute_error(Y_test[col], pred)
 
 
@@ -241,7 +268,7 @@ def main():
             print('🟥' * k)
 
         with timed_step(f"CHARTS [{target}]"):
-            charts(X_test, Y_test, target, model, "1 2 3 4 5 6 ")
+            charts(X_test, Y_test, target, model, "1 2 3 4 5 6 7")
 
 if __name__ == "__main__":
     main()
