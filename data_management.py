@@ -25,9 +25,6 @@ RENAME = {
     "rre150z0": "precip_mm",
 }
 
-REQUIRED = ["wind_speed_kmh", "wind_dir_deg", "wind_gust_max_kmh"]  # adjust to your targets
-
-
 def load_data(station="BOU"):
     files = sorted(DATA_DIR.glob(PATTERN))
     if not files:

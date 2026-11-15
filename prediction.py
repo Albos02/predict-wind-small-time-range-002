@@ -52,35 +52,19 @@ def timed_step(name):
 INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN series up to gap of 2
 
 HORIZON = 2  # 2 x 10 min = 20 min
-COLS = ["temp_c", "humidity_pct", "pressure_qff_hpa", "wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
+COLS = ["wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
 
 
 TARGETS = ["wind_speed_kmh"]
-# TARGETS = ["wind_speed_kmh", "wind_gust_max_kmh", "dir_sin", "dir_cos"]
 LAGS = [1, 2, 3, 4, 5, 6, 9, 12, 36, 48]   # 10 min ... 24 h
-# LAGS = []   # 10 min ... 24 h
-# for i in range(24):
-#     LAGS.append(int(i))    # 10 min ... 24 h
 
 # Window lengths are sample counts at the 10-minute data cadence. A 3-sample
 # window spans 20 minutes (first to last observation), 7 spans 1 hour, and 19
 # spans 3 hours.
 ROLLING_WINDOWS = {"20m": 3, "1h": 7, "3h": 19}
 DIRECTION_CHANGE_LAGS = {"10m": 1, "30m": 3, "1h": 6}
-
-TREND_GROUPS = {
-    1: {
-        "name": "short-term",
-        "trends": ["1-0", "2-0", "3-0", "6-0"],
-        "cols": ["wind_speed_kmh", "wind_gust_max_kmh", "dir_sin", "dir_cos"],
-    },
-    2: {
-        "name": "long-term",
-        "trends": ["1-0", "2-0", "3-0", "6-0", "12-0", "24-0", "48-0", "96-0"],
-        "cols": ["pressure_qff_hpa"],
-    },
-}
-TREND_GROUP = 1  # Select which trend group to use.
+TREND_PERIODS = ("1-0", "2-0", "3-0")
+TREND_COLS = ["wind_speed_kmh", "wind_gust_max_kmh", "dir_sin", "dir_cos"]
 
 
 # XGBoost model configuration.
@@ -165,10 +149,9 @@ def make_xy(df):
 
     for lag in LAGS:
         X = X.join(df.shift(lag).add_suffix(f"_lag{lag}"))
-    trend_group = TREND_GROUPS[TREND_GROUP]
-    for tr in trend_group["trends"]:
+    for tr in TREND_PERIODS:
         a, b = map(int, tr.split("-"))   # a = older point, b = newer point (0 = now)
-        X = X.join((df[trend_group["cols"]].shift(b) - df[trend_group["cols"]].shift(a)).add_suffix(f"_trend{tr}"))
+        X = X.join((df[TREND_COLS].shift(b) - df[TREND_COLS].shift(a)).add_suffix(f"_trend{tr}"))
     y = df[TARGETS].shift(-HORIZON).add_prefix("y_")
     data = X.join(y).dropna()
 
