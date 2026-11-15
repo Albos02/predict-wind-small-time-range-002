@@ -51,19 +51,29 @@ def timed_step(name):
 INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN series up to gap of 2
 
 HORIZON = 2  # 2 x 10 min = 20 min
-COLS = ["temp_c", "humidity_pct", "pressure_qff_hpa",
-        "wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
+COLS = ["temp_c", "humidity_pct", "pressure_qff_hpa", "wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
 
 
 TARGETS = ["wind_speed_kmh"]
 # TARGETS = ["wind_speed_kmh", "wind_gust_max_kmh", "dir_sin", "dir_cos"]
-LAGS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 36, 48]   # 10 min ... 24 h
+LAGS = [1, 2, 3, 4, 5, 6, 9, 12, 36, 48]   # 10 min ... 24 h
 # LAGS = []   # 10 min ... 24 h
 # for i in range(24):
 #     LAGS.append(int(i))    # 10 min ... 24 h
 
-TRENDS = ["1-0", "2-0", "3-0", "6-0"]
-TREND_COLS = ["wind_speed_kmh", "pressure_qff_hpa"]
+TREND_GROUPS = {
+    1: {
+        "name": "short-term",
+        "trends": ["1-0", "2-0", "3-0", "6-0"],
+        "cols": ["wind_speed_kmh", "wind_gust_max_kmh", "dir_sin", "dir_cos"],
+    },
+    2: {
+        "name": "long-term",
+        "trends": ["1-0", "2-0", "3-0", "6-0", "12-0", "24-0", "48-0", "96-0"],
+        "cols": ["pressure_qff_hpa"],
+    },
+}
+TREND_GROUP = 1  # Select which trend group to use.
 
 ##########################################################
 
@@ -94,9 +104,10 @@ def make_xy(df):
     X = df.copy()
     for lag in LAGS:
         X = X.join(df.shift(lag).add_suffix(f"_lag{lag}"))
-    for tr in TRENDS:
+    trend_group = TREND_GROUPS[TREND_GROUP]
+    for tr in trend_group["trends"]:
         a, b = map(int, tr.split("-"))   # a = older point, b = newer point (0 = now)
-        X = X.join((df[TREND_COLS].shift(b) - df[TREND_COLS].shift(a)).add_suffix(f"_trend{tr}"))
+        X = X.join((df[trend_group["cols"]].shift(b) - df[trend_group["cols"]].shift(a)).add_suffix(f"_trend{tr}"))
     y = df[TARGETS].shift(-HORIZON).add_prefix("y_")
     data = X.join(y).dropna()
 
@@ -169,7 +180,8 @@ def charts(X_test, Y_test, target, model, dontshowlist):
     # 7. permutation importance
     if "7" not in dontshowlist:
         idx = np.random.RandomState(0).choice(len(X_test), min(5000, len(X_test)), replace=False)
-        pi = permutation_importance(model, X_test.iloc[idx], true.iloc[idx], n_repeats=5, scoring="neg_mean_absolute_error", random_state=0)
+        pi = permutation_importance(model, X_test.iloc[idx], (true - pers).iloc[idx], n_repeats=5, scoring="neg_mean_absolute_error", random_state=0)
+        # print(X_test.columns, pi.importances_mean, pi.importances_std)
         pd.Series(pi.importances_mean, index=X_test.columns).nlargest(20)[::-1].plot.barh(figsize=(8, 7), title="Permutation importance (top 20)")
 
     plt.show()
@@ -202,15 +214,20 @@ def main():
 
         with timed_step(f"TRAIN MODEL [{target}]"):
             print('TRAINING ...')
-            model = HistGradientBoostingRegressor(max_iter=100, random_state=42, learning_rate=0.1)
-            model.fit(X_train, Y_train[col])
-            mae = mean_absolute_error(model.predict(X_test), Y_test[col])
+            model = HistGradientBoostingRegressor(loss="absolute_error", max_iter=100, random_state=42, learning_rate=0.1)
+
+            model.fit(X_train, Y_train[col] - X_train[target])
+
+            pred = pd.Series(model.predict(X_test) + X_test[target].to_numpy(), index=Y_test.index)
+
+            mae = mean_absolute_error(Y_test[col], pred)
+
 
         with open('last_mae.txt', 'r') as f:
             last_mae = float(f.readlines()[0])
         with open('last_mae.txt', 'w') as f:
             f.write(str(mae))
-            
+
         delta = last_mae - mae                       # > 0 = improvement
         pct = abs(delta) / last_mae * 100
         k = min(20, 1 + int(pct / 0.5))              # 1 emoji per 0.5% change
@@ -224,7 +241,7 @@ def main():
             print('🟥' * k)
 
         with timed_step(f"CHARTS [{target}]"):
-            charts(X_test, Y_test, target, model, "1 2 3 4 5 6 7")
+            charts(X_test, Y_test, target, model, "1 2 3 4 5 6 ")
 
 if __name__ == "__main__":
     main()
