@@ -1,5 +1,6 @@
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -90,6 +91,7 @@ _NEIGHBOR_VECTOR_COLS = tuple(
 
 TARGETS = ["wind_speed_kmh"]
 LAGS = [1, 2, 3, 4, 5, 6, 9, 12, 36, 48]   # 10 min ... 24 h
+CHARTS_DIR = Path(__file__).parent / "charts"
 
 TREND_PERIODS = ("1-0", "2-0", "3-0")
 TREND_COLS = ["wind_speed_kmh", "wind_gust_max_kmh", "wind_u_kmh", "wind_v_kmh"] + [
@@ -297,6 +299,62 @@ def charts(
             figsize=(8, 7), title="Permutation importance (top 20)"
         )
 
+    # Group-permutation importance ranks each feature station as a unit.
+    if "10" not in dontshowlist:
+        sample_idx = np.random.RandomState(0).choice(
+            len(X_test), min(5000, len(X_test)), replace=False
+        )
+        X_sample = X_test.iloc[sample_idx]
+        true_sample = true.iloc[sample_idx]
+        pers_sample = pers.iloc[sample_idx].to_numpy()
+        baseline_mae = mean_absolute_error(
+            true_sample,
+            model.predict(X_sample) + pers_sample,
+        )
+
+        rng = np.random.RandomState(42)
+        station_scores = {}
+        for station in FEATURE_STATIONS:
+            prefix = f"{station.lower()}_"
+            station_columns = [
+                column for column in X_sample.columns if column.startswith(prefix)
+            ]
+            if not station_columns:
+                continue
+
+            shuffled_maes = []
+            for _ in range(5):
+                row_order = rng.permutation(len(X_sample))
+                shuffled = X_sample.copy()
+                shuffled.loc[:, station_columns] = X_sample.iloc[
+                    row_order
+                ][station_columns].to_numpy()
+                shuffled_prediction = model.predict(shuffled) + pers_sample
+                shuffled_maes.append(
+                    mean_absolute_error(true_sample, shuffled_prediction)
+                )
+            station_scores[station] = np.mean(shuffled_maes) - baseline_mae
+
+        ranked_scores = pd.Series(station_scores).sort_values()
+        fig, ax = plt.subplots(figsize=(8, max(4, 0.38 * len(ranked_scores))))
+        colors = ["#059669" if score >= 0 else "#ef4444" for score in ranked_scores]
+        bars = ax.barh(ranked_scores.index, ranked_scores.values, color=colors)
+        ax.axvline(0, color="black", linewidth=0.8)
+        ax.set_xlabel("Increase in test MAE after shuffling station features (km/h)")
+        ax.set_title("Feature station usefulness ranking")
+        ax.grid(axis="x", alpha=0.25)
+        for bar, score in zip(bars, ranked_scores.values):
+            offset = 3 if score >= 0 else -3
+            ax.annotate(
+                f"{score:+.3f}",
+                (score, bar.get_y() + bar.get_height() / 2),
+                xytext=(offset, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if score >= 0 else "right",
+                fontsize=8,
+            )
+        fig.tight_layout()
 
     if Y_train is None or evals_result is None:
         return
@@ -364,6 +422,13 @@ def charts(
         plt.title("Zoom 50h : Réel vs Prédit")
         plt.legend()
 
+    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+    for figure_number, figure_id in enumerate(plt.get_fignums(), start=1):
+        plt.figure(figure_id).savefig(
+            CHARTS_DIR / f"{target}_figure_{figure_number:02d}.png",
+            dpi=150,
+            bbox_inches="tight",
+        )
     plt.show()
 
 

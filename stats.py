@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import os
+from pathlib import Path
 
 from data_management import load_data, clean_data, show_new_parameters
 
@@ -62,6 +62,13 @@ def show_data(df):
 LABELS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 THRESH = 15      # km/h, "windy" threshold
 MIN_HOURS = 3    # hours above THRESH for a "windy day"
+CHARTS_DIR = Path(__file__).parent / "charts"
+
+
+def save_chart(fig, filename):
+    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(CHARTS_DIR / filename, dpi=150, bbox_inches="tight")
+
 
 def show_stats(df):
     ws, gust, wd = df["wind_speed_kmh"], df["wind_gust_max_kmh"], df["wind_dir_deg"]
@@ -207,6 +214,7 @@ def show_stats(df):
     ax.set_title("Correlation")
 
     fig.tight_layout()
+    save_chart(fig, "stats_overview.png")
     plt.show()
 
     ###### OTHER SITE-SPECIFIC STATS ######
@@ -278,6 +286,7 @@ def show_stats(df):
     ax.set_title(f"Windy days per month (>= {MIN_HOURS} h above {THRESH} km/h, avg over years)")
 
     fig.tight_layout()
+    save_chart(fig, "stats_site_specific.png")
     plt.show()
 
     ###### YEAR RANKING ######
@@ -329,6 +338,7 @@ def show_stats(df):
         ax.legend()
 
     fig.tight_layout()
+    save_chart(fig, "stats_year_ranking.png")
     plt.show()
 
 
