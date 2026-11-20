@@ -2,7 +2,7 @@ import pandas as pd
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / "meteoswiss_data"
-PATTERN = "ogd-smn_*_t_historical_*.csv"
+PATTERN = "ogd-smn_{station}_t_historical_*.csv"
 
 RENAME = {
     "station_abbr": "station",
@@ -27,30 +27,31 @@ RENAME = {
 
 def _load_stations(stations):
     stations = tuple(dict.fromkeys(stations))
-    files = sorted(DATA_DIR.rglob(PATTERN))
-    if not files:
-        raise FileNotFoundError(f"no files matching {PATTERN} in {DATA_DIR}")
+    files_by_station = {
+        station: sorted(
+            DATA_DIR.rglob(PATTERN.format(station=station.lower()))
+        )
+        for station in stations
+    }
+    missing_stations = [station for station, files in files_by_station.items() if not files]
+    if missing_stations:
+        raise FileNotFoundError(
+            f"no MeteoSwiss CSV files for station(s) {', '.join(missing_stations)} in {DATA_DIR}"
+        )
 
     parts = {station: [] for station in stations}
-    for f in files:
-        part = pd.read_csv(
-            f,
-            sep=";",
-            encoding="utf-8",
-            na_values=["-", ""],
-            parse_dates=["reference_timestamp"],
-            dayfirst=True,
-        )
-        matching_rows = part.loc[part["station_abbr"].isin(stations)]
-        matching_stations = {
-            station: station_part
-            for station, station_part in matching_rows.groupby("station_abbr", sort=False)
-        }
-        for station in stations:
-            station_part = matching_stations.get(station)
-            if station_part is None:
-                station_part = part.iloc[:0]
-            else:
+    for station, files in files_by_station.items():
+        for f in files:
+            part = pd.read_csv(
+                f,
+                sep=";",
+                encoding="utf-8",
+                na_values=["-", ""],
+                parse_dates=["reference_timestamp"],
+                dayfirst=True,
+            )
+            station_part = part.loc[part["station_abbr"] == station]
+            if not station_part.empty:
                 print(f"{f.name} [{station}]: {len(station_part)} rows")
             parts[station].append(station_part)
 

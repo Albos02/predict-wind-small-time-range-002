@@ -53,7 +53,7 @@ INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN serie
 
 HORIZON = 2  # 2 x 10 min = 20 min
 TARGET_STATION = "BOU"
-FEATURE_STATIONS = ("AIG")
+FEATURE_STATIONS = ("AIG", "ORO", "VEV")
 STATION_PREFIXES = ("", *(f"{station.lower()}_" for station in FEATURE_STATIONS))
 WIND_COLS = ["wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
 COLS = WIND_COLS + [
@@ -68,33 +68,34 @@ _DIRECTION_COLS = {
         for station in FEATURE_STATIONS
     },
 }
+_DIRECTION_FEATURE_COLS = tuple(
+    f"{prefix}_{component}"
+    for prefix in _DIRECTION_COLS.values()
+    for component in ("sin", "cos")
+)
+_FEATURE_STATION_PREFIXES = tuple(
+    f"{station.lower()}_" for station in FEATURE_STATIONS
+)
+_NEIGHBOR_SPEED_GUST_COLS = tuple(
+    f"{prefix}{col}"
+    for prefix in _FEATURE_STATION_PREFIXES
+    for col in ("wind_speed_kmh", "wind_gust_max_kmh")
+)
+_NEIGHBOR_VECTOR_COLS = tuple(
+    f"{prefix}{col}"
+    for prefix in _FEATURE_STATION_PREFIXES
+    for col in ("wind_u_kmh", "wind_v_kmh")
+)
 
 
 TARGETS = ["wind_speed_kmh"]
 LAGS = [1, 2, 3, 4, 5, 6, 9, 12, 36, 48]   # 10 min ... 24 h
 
-# Window lengths are sample counts at the 10-minute data cadence. A 3-sample
-# window spans 20 minutes (first to last observation), 7 spans 1 hour, and 19
-# spans 3 hours.
-ROLLING_WINDOWS = {"20m": 3, "1h": 7, "3h": 19}
-DIRECTION_CHANGE_LAGS = {"10m": 1, "30m": 3, "1h": 6}
 TREND_PERIODS = ("1-0", "2-0", "3-0")
-ROLLING_COLS = [
+TREND_COLS = ["wind_speed_kmh", "wind_gust_max_kmh", "wind_u_kmh", "wind_v_kmh"] + [
     f"{prefix}{col}"
-    for prefix in STATION_PREFIXES
-    for col in ("wind_speed_kmh", "wind_gust_max_kmh")
-]
-TREND_COLS = [
-    f"{prefix}{col}"
-    for prefix in STATION_PREFIXES
-    for col in (
-        "wind_speed_kmh",
-        "wind_gust_max_kmh",
-        "dir_sin",
-        "dir_cos",
-        "wind_u_kmh",
-        "wind_v_kmh",
-    )
+    for prefix in _FEATURE_STATION_PREFIXES
+    for col in ("wind_u_kmh", "wind_v_kmh")
 ]
 
 
@@ -157,60 +158,49 @@ def split(df, test_from="2023-01-01"):
 
 
 def make_xy(df):
-    X = df.copy()
+    # Neighbor absolute speed/gust and vectors are recoverable from BOU plus
+    # the relative deltas, so keep those instead of duplicate raw readings.
+    excluded_cols = [
+        *_DIRECTION_FEATURE_COLS,
+        *_NEIGHBOR_SPEED_GUST_COLS,
+        *_NEIGHBOR_VECTOR_COLS,
+    ]
+    X = df.drop(columns=excluded_cols).copy()
 
-    # Trailing summaries capture the local level, variability, and rate of
-    # change. These windows include the current observation but never look
-    # forward in time.
-    for col in ROLLING_COLS:
-        series = df[col]
-        for period, window in ROLLING_WINDOWS.items():
-            rolling = series.rolling(window=window, min_periods=window)
-            X[f"{col}_roll_mean_{period}"] = rolling.mean()
-            X[f"{col}_roll_std_{period}"] = rolling.std(ddof=0)
-            elapsed_hours = (window - 1) / 6
-            X[f"{col}_slope_per_hour_{period}"] = (
-                series - series.shift(window - 1)
-            ) / elapsed_hours
-
-    # Circular direction deltas avoid the discontinuity between 359 and 0
-    # degrees. The sine/cosine pair describes the turn from the older
-    # observation to the current one.
-    for prefix in STATION_PREFIXES:
-        for period, lag in DIRECTION_CHANGE_LAGS.items():
-            old_sin = df[f"{prefix}dir_sin"].shift(lag)
-            old_cos = df[f"{prefix}dir_cos"].shift(lag)
-            X[f"{prefix}dir_change_sin_{period}"] = (
-                df[f"{prefix}dir_sin"] * old_cos
-                - df[f"{prefix}dir_cos"] * old_sin
-            )
-            X[f"{prefix}dir_change_cos_{period}"] = (
-                df[f"{prefix}dir_sin"] * old_sin
-                + df[f"{prefix}dir_cos"] * old_cos
-            )
-
-    # Cyclic calendar features let the model learn recurring daily and annual
-    # patterns without artificial jumps at midnight or New Year's Day.
-    hour = df.index.hour + df.index.minute / 60 + df.index.second / 3600
-    hour_angle = 2 * np.pi * hour / 24
-    X["hour_sin"] = np.sin(hour_angle)
-    X["hour_cos"] = np.cos(hour_angle)
-
-    fraction_of_day = hour / 24
-    days_in_year = np.where(df.index.is_leap_year, 366, 365)
-    year_position = df.index.dayofyear - 1 + fraction_of_day
-    year_angle = 2 * np.pi * year_position / days_in_year
-    X["dayofyear_sin"] = np.sin(year_angle)
-    X["dayofyear_cos"] = np.cos(year_angle)
-
+    # Past direction is already encoded in the wind-vector components, so
+    # avoid duplicating it with lagged sine/cosine direction values.
+    lag_features = df.drop(
+        columns=[*_DIRECTION_FEATURE_COLS, *_NEIGHBOR_SPEED_GUST_COLS]
+    )
     for lag in LAGS:
-        X = X.join(df.shift(lag).add_suffix(f"_lag{lag}"))
+        lag_columns = lag_features.columns
+        if lag >= 6:
+            # Neighbor readings older than one hour add little for this
+            # 20-minute horizon; retain longer history only for the target.
+            lag_columns = [
+                col for col in lag_columns
+                if not col.startswith(_FEATURE_STATION_PREFIXES)
+            ]
+        if lag in (3, 4):
+            # These absolute neighbor vectors are represented by the target
+            # vectors and relative vector deltas at the same lag.
+            lag_columns = [
+                col for col in lag_columns
+                if not (
+                    col.startswith(_NEIGHBOR_VECTOR_COLS)
+                    and "_delta_from_bou" not in col
+                )
+            ]
+        X = X.join(
+            lag_features[lag_columns].shift(lag).add_suffix(f"_lag{lag}")
+        )
     for tr in TREND_PERIODS:
         a, b = map(int, tr.split("-"))   # a = older point, b = newer point (0 = now)
         X = X.join((df[TREND_COLS].shift(b) - df[TREND_COLS].shift(a)).add_suffix(f"_trend{tr}"))
     y = df[TARGETS].shift(-HORIZON).add_prefix("y_")
     data = X.join(y).dropna()
 
+    print("Shape of the data trained/tested on : ", data.shape)
     return data[X.columns], data[y.columns]
 
 
