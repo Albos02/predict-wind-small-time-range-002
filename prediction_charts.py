@@ -10,6 +10,17 @@ from sklearn.metrics import mean_absolute_error
 from prediction_variables import CHARTS_DIR, FEATURE_STATIONS, HORIZON
 
 
+def _save_and_show(target):
+    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+    for figure_number, figure_id in enumerate(plt.get_fignums(), start=1):
+        plt.figure(figure_id).savefig(
+            CHARTS_DIR / f"{target}_figure_{figure_number:02d}.png",
+            dpi=150,
+            bbox_inches="tight",
+        )
+    plt.show()
+
+
 def charts(
     X_test,
     Y_test,
@@ -161,6 +172,7 @@ def charts(
         fig.tight_layout()
 
     if Y_train is None or evals_result is None:
+        _save_and_show(target)
         return
 
     y_train = Y_train[col].to_numpy()
@@ -207,9 +219,13 @@ def charts(
         ax[1, 0].axvline(x=0, color="black", linestyle="--")
         ax[1, 0].set_title("Distribution des erreurs (Résidus)")
 
-        importance = model.get_booster().get_score(importance_type="weight")
-        feature_names = model.get_booster().feature_names or []
-        importances = [importance.get(name, 0) for name in feature_names]
+        if hasattr(model, "booster_"):
+            feature_names = model.booster_.feature_name()
+            importances = model.feature_importances_
+        else:
+            importance = model.get_booster().get_score(importance_type="weight")
+            feature_names = model.get_booster().feature_names or []
+            importances = [importance.get(name, 0) for name in feature_names]
         colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.9, max(1, len(feature_names))))
         ax[1, 1].barh(feature_names, importances, color=colors)
         ax[1, 1].set_title("Importance des variables")
@@ -225,11 +241,4 @@ def charts(
         plt.title("Zoom 50h : Réel vs Prédit")
         plt.legend()
 
-    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
-    for figure_number, figure_id in enumerate(plt.get_fignums(), start=1):
-        plt.figure(figure_id).savefig(
-            CHARTS_DIR / f"{target}_figure_{figure_number:02d}.png",
-            dpi=150,
-            bbox_inches="tight",
-        )
-    plt.show()
+    _save_and_show(target)
