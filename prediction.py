@@ -1,4 +1,5 @@
 import time
+import json
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -8,7 +9,6 @@ import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from xgboost import XGBRegressor
 
 from data_management import load_prediction_data, clean_data, show_new_parameters
 
@@ -54,7 +54,8 @@ INTERPOLATION_NAN_LIMIT = 0 # 0=no interpolation, ... 2 = interpolates NaN serie
 
 HORIZON = 2  # 2 x 10 min = 20 min
 TARGET_STATION = "BOU"
-FEATURE_STATIONS = ("AIG", "ORO", "VEV")
+# FEATURE_STATIONS = ("AIG", "ORO", "PUY", "EVI", "PRE", "CGI", "VEV", "CDM", "DOL", "MAH", "BIE", "MAR", "MOB", "SIO", "CHB", "MAS", "BOL", "THU", "ABO", "VIT", "MVE", "CHA", "NAP")
+FEATURE_STATIONS = ("AIG", "ORO", "PUY", "VEV")
 STATION_PREFIXES = ("", *(f"{station.lower()}_" for station in FEATURE_STATIONS))
 WIND_COLS = ["wind_dir_deg", "wind_speed_kmh", "wind_gust_max_kmh"]
 COLS = WIND_COLS + [
@@ -92,6 +93,7 @@ _NEIGHBOR_VECTOR_COLS = tuple(
 TARGETS = ["wind_speed_kmh"]
 LAGS = [1, 2, 3, 4, 5, 6, 9, 12, 36, 48]   # 10 min ... 24 h
 CHARTS_DIR = Path(__file__).parent / "charts"
+STATION_COORDINATES_PATH = Path(__file__).parent / "coord_station_meteosuisse.json"
 
 TREND_PERIODS = ("1-0", "2-0", "3-0")
 TREND_COLS = ["wind_speed_kmh", "wind_gust_max_kmh", "wind_u_kmh", "wind_v_kmh"] + [
@@ -99,6 +101,62 @@ TREND_COLS = ["wind_speed_kmh", "wind_gust_max_kmh", "wind_u_kmh", "wind_v_kmh"]
     for prefix in _FEATURE_STATION_PREFIXES
     for col in ("wind_u_kmh", "wind_v_kmh")
 ]
+TREND_COLS += [
+    f"{station.lower()}_{feature}"
+    for station in FEATURE_STATIONS
+    for feature in (
+        "flow_toward_bou_kmh",
+        "crossflow_to_bou_kmh",
+        "flow_alignment_to_bou",
+    )
+]
+
+
+def add_advection_features(df):
+    """Describe whether each feature station is transporting wind toward BOU."""
+    with STATION_COORDINATES_PATH.open(encoding="utf-8") as stations_file:
+        stations = json.load(stations_file)
+    coordinates = {
+        station[0]: (float(station[1]), float(station[2]))
+        for station in stations
+        if station[1] is not None and station[2] is not None
+    }
+    target_lat, target_lon = coordinates[TARGET_STATION]
+    result = df.copy()
+
+    for station in FEATURE_STATIONS:
+        station_lat, station_lon = coordinates[station]
+        mean_lat = np.deg2rad((target_lat + station_lat) / 2)
+        east_km = (target_lon - station_lon) * 111.32 * np.cos(mean_lat)
+        north_km = (target_lat - station_lat) * 111.32
+        distance_km = float(np.hypot(east_km, north_km))
+        unit_east = east_km / distance_km if distance_km else 0.0
+        unit_north = north_km / distance_km if distance_km else 0.0
+        prefix = f"{station.lower()}_"
+        u = result[f"{prefix}wind_u_kmh"]
+        v = result[f"{prefix}wind_v_kmh"]
+        speed = np.hypot(u, v)
+        toward_bou = u * unit_east + v * unit_north
+        cross_to_bou = -u * unit_north + v * unit_east
+
+        result[f"{prefix}distance_to_bou_km"] = distance_km
+        result[f"{prefix}flow_toward_bou_kmh"] = toward_bou
+        result[f"{prefix}crossflow_to_bou_kmh"] = cross_to_bou
+        result[f"{prefix}flow_alignment_to_bou"] = np.divide(
+            toward_bou,
+            speed,
+            out=np.zeros(len(result), dtype=float),
+            where=np.asarray(speed) > 0.1,
+        )
+        # A bounded travel-time feature distinguishes a useful upwind signal
+        # from a station whose current flow points away from BOU.
+        result[f"{prefix}advection_time_to_bou_min"] = np.where(
+            toward_bou > 0.1,
+            np.minimum(distance_km / np.maximum(toward_bou, 0.1) * 60, 180),
+            180.0,
+        )
+
+    return result
 
 
 # XGBoost model configuration.
@@ -147,6 +205,8 @@ def prepare(df, last_added_parameter):
             df[f"{prefix}{component}_delta_from_bou"] = (
                 df[f"{prefix}{component}"] - df[component]
             )
+
+    df = add_advection_features(df)
 
     df = df.asfreq("10min")
     
@@ -433,6 +493,8 @@ def charts(
 
 
 def main():
+    from xgboost import XGBRegressor
+
     with timed_step("LOAD DATA"):
         df = load_prediction_data(target_station=TARGET_STATION, feature_stations=FEATURE_STATIONS)
 
